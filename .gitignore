@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# Environment
+.env
+
+# Agent data (do not commit)
+data/chroma_store/
+data/sessions/
+
+# Matplotlib output
+/tmp/*.png
+
+# IDE
+.vscode/settings.json
+*.swp
+.DS_Store
+
+# Test cache
+.pytest_cache/
+.mypy_cache/
+htmlcov/
+.coverage

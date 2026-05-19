@@ -1,0 +1,6 @@
+# This directory holds persisted agent data:
+#   chroma_store/  — ChromaDB vector database
+#   sessions/      — Short-term memory JSON files
+#
+# Both are created automatically at runtime.
+# Do not commit chroma_store/ or sessions/ to version control.
