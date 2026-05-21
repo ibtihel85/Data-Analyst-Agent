@@ -1,19 +1,18 @@
 # Core
-fastapi==0.111.0
-uvicorn==0.29.0
-pydantic==2.7.1
+fastapi==0.115.0
+uvicorn>=0.31.1,<0.33
+pydantic>=2.8,<3
 python-dotenv==1.0.1
-httpx==0.27.0
+httpx>=0.27.1,<0.28
 requests==2.31.0
 
 # MCP
-mcp==1.0.0
+mcp==1.21.0
 
 # Vector DB & Embeddings (CPU-safe)
 chromadb==0.5.3
 sentence-transformers==2.7.0
-# Force CPU-only torch (no CUDA)
-torch==2.3.0+cpu --extra-index-url https://download.pytorch.org/whl/cpu
+
 
 # PDF
 pdfplumber==0.11.0
