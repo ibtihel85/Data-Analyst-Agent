@@ -48,9 +48,17 @@ Guidelines:
 - When writing code_exec scripts, prefer pandas for tabular data and
   matplotlib (Agg backend, save to /tmp/) for charts.
 - Be concise and precise in your final answers.
-- If a tool returns an error, explain it clearly and suggest alternatives.
-- Never invent data. Use tools to retrieve real information.
+- If a tool returns an error, ALWAYS retry with corrected parameters or switch
+  to code_exec as a fallback. Never give up after one failure.
+- NEVER invent, fabricate, or estimate data. Every number in your answer must
+  come from an actual tool result in this conversation.
+- If you cannot retrieve real data after retrying, say so explicitly.
 - After receiving tool results, synthesise them into a clear answer.
+- For optional integer parameters, always pass their default value, never null.
+- If pre-fetched context is provided at the start of the message, use it directly
+  to answer. Do not repeat the same tool call for data already retrieved.
+- When a web_scrape result contains tables, extract and present the data from
+  those tables rather than returning raw JSON.
 
 Available tools: file_search, pdf_read, web_scrape, vector_search, code_exec.
 """
@@ -104,7 +112,11 @@ class DataAnalystAgent:
             context_parts.append(f"[{pc.tool} result]\n{result}")
 
         if context_parts:
-            return "Pre-fetched context:\n" + "\n\n".join(context_parts)
+            return (
+                "Pre-fetched context (use this data to answer the user — "
+                "do NOT call the same tool again for the same URL):\n"
+                + "\n\n".join(context_parts)
+            )
         return ""
 
     # ── Agent loop ────────────────────────────────────────────────────────
@@ -170,6 +182,16 @@ class DataAnalystAgent:
                     content=result_text,
                 )
                 console.print(f"  [green]✓ result:[/green] [dim]{result_text[:150]}…[/dim]")
+                # If the tool returned an error, nudge the LLM to retry or fallback
+                if '"error"' in result_text or "validation error" in result_text.lower():
+                    self.st_memory.add(
+                        "user",
+                        f"The tool call to '{tc.name}' failed with: {result_text}. "
+                        "Please retry with corrected parameters — fix any null or missing "
+                        "integer fields by using their default values. If the tool keeps "
+                        "failing, use code_exec with requests and BeautifulSoup as a "
+                        "fallback. Never invent or fabricate data.",
+                    )
 
         else:
             # Hit iteration limit — ask LLM to summarise what it has
