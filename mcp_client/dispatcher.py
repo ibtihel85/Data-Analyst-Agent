@@ -152,6 +152,23 @@ class MCPDispatcher:
             raise ValueError(f"No MCP server registered for tool: {tool_name}")
         return self._servers[script]
 
+    # Allowed parameters per tool — anything else is stripped before dispatch
+    _TOOL_ALLOWED_PARAMS: dict[str, set[str]] = {
+        "file_search":   {"directory", "pattern", "recursive"},
+        "pdf_read":      {"path", "pages"},
+        "web_scrape":    {"url", "max_text_chars"},
+        "vector_search": {"query", "collection", "top_k"},
+        "code_exec":     {"code", "timeout_seconds"},
+    }
+
+    # Default values for optional integer/bool params that must never be null
+    _TOOL_DEFAULTS: dict[str, dict] = {
+        "web_scrape":    {"max_text_chars": 8000},
+        "vector_search": {"top_k": 5, "collection": "analyst_memory"},
+        "code_exec":     {"timeout_seconds": 15},
+        "file_search":   {"recursive": True},
+    }
+
     async def call(
         self,
         tool_name: str,
@@ -162,6 +179,30 @@ class MCPDispatcher:
         Call a tool by name, returning the result as a JSON string.
         Raises on error or timeout.
         """
+        # 1. Strip any hallucinated parameters not in this tool's schema
+        allowed = self._TOOL_ALLOWED_PARAMS.get(tool_name)
+        if allowed:
+            stripped = {k: v for k, v in arguments.items() if k in allowed}
+            if stripped != arguments:
+                removed = set(arguments) - allowed
+                log.warning(f"[dispatcher] Stripped unknown params for {tool_name}: {removed}")
+            arguments = stripped
+
+        # 2. Apply defaults for any missing or null optional fields
+        defaults = self._TOOL_DEFAULTS.get(tool_name, {})
+        for key, default_val in defaults.items():
+            if arguments.get(key) is None:
+                arguments[key] = default_val
+
+        # 3. Coerce string numbers to the correct type based on defaults
+        for key, default_val in defaults.items():
+            if key in arguments and not isinstance(arguments[key], type(default_val)):
+                try:
+                    arguments[key] = type(default_val)(arguments[key])
+                    log.warning(f"[dispatcher] Coerced {tool_name}.{key} to {type(default_val).__name__}")
+                except (ValueError, TypeError):
+                    arguments[key] = default_val
+
         server = self._server_for_tool(tool_name)
         log.info(f"[tool call] {tool_name}({json.dumps(arguments, default=str)[:120]})")
 
