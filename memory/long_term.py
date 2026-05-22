@@ -13,7 +13,11 @@ from datetime import datetime
 from typing import Any
 
 import chromadb
+from chromadb.config import Settings
 from sentence_transformers import SentenceTransformer
+
+import logging
+logging.getLogger("chromadb.telemetry").setLevel(logging.CRITICAL)
 
 from config import cfg
 from utils.logger import get_logger
@@ -52,7 +56,19 @@ class LongTermMemory:
         if self._client is not None:
             return
         log.debug("Initialising ChromaDB + embedding model (first use)…")
-        self._client = chromadb.PersistentClient(path=str(cfg.CHROMA_PERSIST_DIR))
+        try:
+            from pathlib import Path
+            db_path = Path(cfg.CHROMA_PERSIST_DIR).expanduser().resolve()
+            db_path.mkdir(parents=True, exist_ok=True)
+            self._client = chromadb.PersistentClient(
+                path=str(db_path),
+                settings=Settings(anonymized_telemetry=False),
+            )
+            log.debug(f"ChromaDB PersistentClient initialised at {db_path}")
+        except Exception as exc:
+            log.error(f"ChromaDB PersistentClient failed ({exc}), falling back to in-memory client.")
+            self._client = chromadb.Client(Settings(anonymized_telemetry=False))
+
         self._collection = self._client.get_or_create_collection(
             cfg.CHROMA_COLLECTION,
             metadata={"hnsw:space": "cosine"},
