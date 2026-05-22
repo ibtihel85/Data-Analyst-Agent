@@ -82,7 +82,7 @@ TOOL_SCHEMAS: list[dict] = [
                     "max_text_chars": {
                         "type": "integer",
                         "default": 3000,
-                        "description": "Maximum characters of text to return.",
+                        "description": "Maximum characters of text to return. Must be a positive integer. Default is 3000. Never pass null.",
                     },
                 },
                 "required": ["url"],
