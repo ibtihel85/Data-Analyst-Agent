@@ -165,7 +165,7 @@ class MCPDispatcher:
     _TOOL_DEFAULTS: dict[str, dict] = {
         "web_scrape":    {"max_text_chars": 8000},
         "vector_search": {"top_k": 5, "collection": "analyst_memory"},
-        "code_exec":     {"timeout_seconds": 15},
+        "code_exec":     {"timeout_seconds": 30},   # 15s too short on Windows cold start
         "file_search":   {"recursive": True},
     }
 
@@ -202,6 +202,30 @@ class MCPDispatcher:
                     log.warning(f"[dispatcher] Coerced {tool_name}.{key} to {type(default_val).__name__}")
                 except (ValueError, TypeError):
                     arguments[key] = default_val
+
+        # 4. Validate that required string/int fields contain real scalar values,
+        #    not dicts (schema leakage that slipped past the LLM client).
+        _REQUIRED_SCALAR_FIELDS: dict[str, type] = {}
+        schema_required = {
+            "file_search":   {"directory": str, "pattern": str},
+            "pdf_read":      {"path": str},
+            "web_scrape":    {"url": str},
+            "vector_search": {"query": str},
+            "code_exec":     {"code": str},
+        }
+        for field_name, expected_type in schema_required.get(tool_name, {}).items():
+            val = arguments.get(field_name)
+            if val is None:
+                return json.dumps({
+                    "error": f"Tool '{tool_name}' missing required field '{field_name}'."
+                })
+            if not isinstance(val, expected_type):
+                return json.dumps({
+                    "error": (
+                        f"Tool '{tool_name}' field '{field_name}' must be "
+                        f"{expected_type.__name__}, got {type(val).__name__}: {str(val)[:80]}"
+                    )
+                })
 
         server = self._server_for_tool(tool_name)
         log.info(f"[tool call] {tool_name}({json.dumps(arguments, default=str)[:120]})")
