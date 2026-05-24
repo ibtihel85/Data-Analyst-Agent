@@ -45,8 +45,7 @@ CSV files, PDFs, web pages, and databases using Python.
 
 Guidelines:
 - Always use the available tools to gather data before drawing conclusions.
-- When writing code_exec scripts, prefer pandas for tabular data and
-  matplotlib (Agg backend, save to /tmp/) for charts.
+- When writing code_exec scripts, prefer pandas for tabular data and matplotlib (Agg backend) for charts. Save chart files using a path returned by tempfile.mkdtemp() — never hardcode /tmp/ .
 - Be concise and precise in your final answers.
 - If a tool returns an error, ALWAYS retry with corrected parameters or switch
   to code_exec as a fallback. Never give up after one failure.
@@ -184,13 +183,31 @@ class DataAnalystAgent:
                 console.print(f"  [green]✓ result:[/green] [dim]{result_text[:150]}…[/dim]")
                 # If the tool returned an error, nudge the LLM to retry or fallback
                 if '"error"' in result_text or "validation error" in result_text.lower():
+                    # Build a tool-specific correction hint so the model knows
+                    # exactly what to fix without being nudged toward unrelated tools.
+                    _CORRECTION_HINTS: dict[str, str] = {
+                        "file_search": (
+                            "Ensure 'directory' is an absolute Windows path string "
+                            "(e.g. 'C:\\\\Users\\\\username'), 'pattern' is a glob string "
+                            "like '*.csv', and 'recursive' is true or false."
+                        ),
+                        "pdf_read": "Ensure 'path' is an absolute path string to a PDF file.",
+                        "web_scrape": "Ensure 'url' is a full http/https URL string.",
+                        "vector_search": "Ensure 'query' is a non-empty string.",
+                        "code_exec": (
+                            "Ensure 'code' is a valid Python string. "
+                            "Use os.path or pathlib for file paths — never /tmp/."
+                        ),
+                    }
+                    hint = _CORRECTION_HINTS.get(tc.name, "Check all required fields are correct types.")
                     self.st_memory.add(
                         "user",
-                        f"The tool call to '{tc.name}' failed with: {result_text}. "
-                        "Please retry with corrected parameters — fix any null or missing "
-                        "integer fields by using their default values. If the tool keeps "
-                        "failing, use code_exec with requests and BeautifulSoup as a "
-                        "fallback. Never invent or fabricate data.",
+                        f"The tool call to '{tc.name}' failed: {result_text}\n"
+                        f"Correction required: {hint}\n"
+                        "Retry the same tool with corrected arguments. "
+                        "Do NOT switch to a different tool or method. "
+                        "Do NOT use web scraping, requests, or BeautifulSoup for local tasks. "
+                        "Never invent or fabricate data.",
                     )
 
         else:
