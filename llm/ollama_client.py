@@ -50,37 +50,116 @@ class LLMResponse:
     finish_reason: str = "stop"
     raw: dict = field(default_factory=dict)
 
+def _is_schema_node(value: Any) -> bool:
+    """
+    Return True if *value* looks like a JSON Schema property descriptor
+    (i.e. the LLM echoed the schema back instead of filling in a real value).
+    A schema node is a dict that contains 'type' and/or 'description' keys
+    but NOT any data-like keys.
+    """
+    if not isinstance(value, dict):
+        return False
+    schema_keys = {"type", "description", "default", "enum", "items", "properties"}
+    non_schema_keys = set(value.keys()) - schema_keys
+    has_schema_marker = "type" in value or "description" in value
+    return has_schema_marker and not non_schema_keys
+
+
+def _arguments_are_schema_leaked(arguments: dict) -> bool:
+    """Return True if any argument value is a schema node (schema leakage)."""
+    return any(_is_schema_node(v) for v in arguments.values())
+
+
+def _extract_json_objects(text: str) -> list[dict]:
+    """
+    Extract all top-level JSON objects from *text* using a balanced-brace
+    scanner.  Handles nested objects and arrays that defeat simple regexes.
+    """
+    results: list[dict] = []
+    i = 0
+    while i < len(text):
+        if text[i] == "{":
+            depth = 0
+            in_string = False
+            escape_next = False
+            for j in range(i, len(text)):
+                ch = text[j]
+                if escape_next:
+                    escape_next = False
+                    continue
+                if ch == "\\" and in_string:
+                    escape_next = True
+                    continue
+                if ch == '"':
+                    in_string = not in_string
+                    continue
+                if in_string:
+                    continue
+                if ch == "{":
+                    depth += 1
+                elif ch == "}":
+                    depth -= 1
+                    if depth == 0:
+                        fragment = text[i : j + 1]
+                        try:
+                            obj = json.loads(fragment)
+                            if isinstance(obj, dict):
+                                results.append(obj)
+                        except json.JSONDecodeError:
+                            pass
+                        i = j + 1
+                        break
+            else:
+                break
+        else:
+            i += 1
+    return results
+
 
 def _extract_tool_calls_from_text(text: str) -> list[ToolCall]:
     """
     Fallback parser for models that embed tool calls as JSON inside text
     rather than using Ollama's native tool_calls field.
 
-    Looks for patterns like:
-      {"name": "tool_name", "arguments": {...}}
-    or fenced ```json blocks.
+    Handles fenced ```json blocks and bare JSON objects anywhere in the text.
+    Uses a balanced-brace scanner so nested argument objects are parsed
+    correctly (the previous regex approach silently dropped nested values).
     """
     calls: list[ToolCall] = []
-    # Try fenced JSON blocks first
-    fenced = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
-    candidates = fenced or [text]
 
-    for candidate in candidates:
-        candidate = candidate.strip()
-        # Find all JSON objects that look like tool calls
-        for match in re.finditer(r'\{[^{}]*"name"\s*:\s*"(\w+)"[^{}]*\}', candidate, re.DOTALL):
-            try:
-                obj = json.loads(match.group(0))
-                if "name" in obj:
-                    tc = ToolCall(
-                        id=f"fallback_{len(calls)}",
-                        name=obj["name"],
-                        arguments=obj.get("arguments", obj.get("parameters", {})),
-                    )
-                    calls.append(tc)
-            except json.JSONDecodeError:
-                pass
+    # Prefer fenced blocks; fall back to scanning the whole text
+    fenced_blocks = re.findall(r"```(?:json)?\s*(\{.*?})\s*```", text, re.DOTALL)
+    search_texts = fenced_blocks if fenced_blocks else [text]
+
+    known_tool_names = {
+        "file_search", "pdf_read", "web_scrape", "vector_search", "code_exec"
+    }
+
+    for source in search_texts:
+        for obj in _extract_json_objects(source):
+            name = obj.get("name") or obj.get("tool") or obj.get("function", {}).get("name")
+            if not isinstance(name, str) or name not in known_tool_names:
+                continue
+            args = (
+                obj.get("arguments")
+                or obj.get("parameters")
+                or obj.get("function", {}).get("arguments")
+                or {}
+            )
+            if not isinstance(args, dict):
+                continue
+            if _arguments_are_schema_leaked(args):
+                log.warning(
+                    f"[ollama] Fallback parser: schema leakage detected in '{name}' "
+                    f"— discarding malformed tool call"
+                )
+                continue
+            calls.append(ToolCall(id=f"fallback_{len(calls)}", name=name, arguments=args))
+
     return calls
+
+
+    
 
 
 class OllamaClient:
@@ -138,16 +217,28 @@ class OllamaClient:
         # Parse native Ollama tool_calls
         for i, tc in enumerate(raw_tool_calls):
             fn = tc.get("function", {})
+            name = fn.get("name", "")
             args = fn.get("arguments", {})
             if isinstance(args, str):
                 try:
                     args = json.loads(args)
                 except json.JSONDecodeError:
                     args = {}
+            if not isinstance(args, dict):
+                args = {}
+
+            # Detect schema leakage: model echoed property descriptors as values
+            if _arguments_are_schema_leaked(args):
+                log.warning(
+                    f"[ollama] Schema leakage detected in native tool call '{name}' "
+                    f"— dropping malformed call so retry logic can recover"
+                )
+                continue          # skip this tool call entirely; do NOT append it
+
             tool_calls.append(
                 ToolCall(
                     id=tc.get("id", f"call_{i}"),
-                    name=fn.get("name", ""),
+                    name=name,
                     arguments=args,
                 )
             )
