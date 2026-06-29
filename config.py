@@ -30,9 +30,14 @@ class Config:
     # ── Embeddings ────────────────────────────────────────────────────────
     EMBEDDING_MODEL: str = "all-MiniLM-L6-v2"  # ~80 MB, CPU-safe
 
+    # ── API server ────────────────────────────────────────────────────────
+    API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
+    API_PORT: int = int(os.getenv("API_PORT", "8000"))
+
     # ── Logging ───────────────────────────────────────────────────────────
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
-
+    
+    
     @classmethod
     def ensure_dirs(cls) -> None:
         cls.SESSION_MEMORY_DIR.mkdir(parents=True, exist_ok=True)

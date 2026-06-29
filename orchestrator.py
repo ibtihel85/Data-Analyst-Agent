@@ -33,6 +33,7 @@ from memory.short_term import ShortTermMemory
 from tools.schemas import TOOL_SCHEMAS
 from utils.intent_classifier import classify
 from utils.logger import get_logger
+from utils.metrics import metrics_store
 
 log = get_logger(__name__)
 console = Console()
@@ -176,6 +177,7 @@ class DataAnalystAgent:
                     f"[dim]{json.dumps(tc.arguments, default=str)[:100]}[/dim]"
                 )
                 result_text = await self._run_tool(tc.name, tc.arguments)
+                metrics_store.record_tool_call()
                 self.st_memory.add_tool_result(
                     tool_call_id=tc.id,
                     content=result_text,
