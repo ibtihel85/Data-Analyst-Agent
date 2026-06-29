@@ -1,0 +1,66 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Local Data Analyst Agent — Docker Compose
+#
+# Usage:
+#   docker compose up --build          # start both Ollama + agent API
+#   docker compose up agent            # agent only (if Ollama runs on host)
+#   docker compose run --rm agent python orchestrator.py   # interactive CLI
+#   docker compose run --rm agent python ingest.py /data   # ingest documents
+#   docker compose run --rm agent python tests/eval_suite.py  # run evals
+#
+# First-time model pull (run once):
+#   docker compose exec ollama ollama pull llama3.2:3b
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── Ollama: local LLM inference ──────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    container_name: local-analyst-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama     # persist downloaded models
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Agent API ────────────────────────────────────────────────────────────
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: local-analyst-agent
+    ports:
+      - "8000:8000"
+    volumes:
+      - agent_data:/app/data            # persist ChromaDB + session memory
+      - ./data:/app/data/host_data:ro   # mount host data dir as read-only
+    environment:
+      OLLAMA_BASE_URL: http://ollama:11434   # service name resolves inside compose network
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.2:3b}
+      MAX_TOOL_ITERATIONS: ${MAX_TOOL_ITERATIONS:-10}
+      TOOL_TIMEOUT_SECONDS: ${TOOL_TIMEOUT_SECONDS:-15}
+      CODE_EXEC_TIMEOUT_SECONDS: ${CODE_EXEC_TIMEOUT_SECONDS:-15}
+      SHORT_TERM_MEMORY_SIZE: ${SHORT_TERM_MEMORY_SIZE:-20}
+      CHROMA_COLLECTION: ${CHROMA_COLLECTION:-analyst_memory}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  ollama_models:   # named volume — survives container restarts
+  agent_data:      # named volume — persists ChromaDB + sessions
