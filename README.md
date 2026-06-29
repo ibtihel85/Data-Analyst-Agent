@@ -3,7 +3,8 @@
 A **100% local, CPU-only, open-source** data analyst agent powered by:
 - **Ollama** for local LLM inference (no cloud, no API keys)
 - **MCP (Model Context Protocol)** for structured tool calling
-- **ChromaDB + sentence-transformers** for semantic memory
+- **ChromaDB + sentence-transformers** for semantic memory and RAG
+- **FastAPI** REST API so the agent is usable as a service
 - **pandas / matplotlib / DuckDB** for data analysis
 
 ---
@@ -11,7 +12,7 @@ A **100% local, CPU-only, open-source** data analyst agent powered by:
 ## Architecture
 
 ```
-User Query
+User Query  (CLI  or  POST /chat)
     │
     ▼
 [Intent Classifier]         ← regex/keyword pre-routing
@@ -26,29 +27,36 @@ User Query
     │               ▼
     │         [MCP Dispatcher]  ← JSON-RPC over stdio subprocess
     │               │
-    │         ┌─────┴─────────────────────────────────┐
-    │         │ filesystem_server │ pdf_server          │
-    │         │ web_server        │ vector_server        │
-    │         │ code_server       │                      │
-    │         └───────────────────────────────────────┘
+    │         ┌─────┴──────────────────────────────────────┐
+    │         │ filesystem_server │ pdf_server              │
+    │         │ web_server        │ vector_server (RAG)     │
+    │         │ code_server       │                         │
+    │         └────────────────────────────────────────────┘
     │               │
     └── tool results injected → LLM continues
     │
     ▼
 [Final Response]
     │
-    ▼
-[Memory: short-term deque + ChromaDB long-term]
+    ├── Short-term memory  (sliding deque, JSON-persisted)
+    └── Long-term memory   (ChromaDB vector store, cosine similarity)
+
+                ↑
+         ingest.py pre-indexes any local file into the vector store
 ```
 
 ### Project Structure
 
 ```
 local-data-analyst/
-├── orchestrator.py          ← main entry point / agent loop
+├── orchestrator.py          ← main CLI entry point / agent loop
+├── api.py                   ← FastAPI REST API (NEW)
+├── ingest.py                ← document ingestion CLI for RAG (NEW)
 ├── config.py                ← all settings (reads .env)
 ├── requirements.txt
 ├── .env.example
+├── Dockerfile               ← production container (NEW)
+├── docker-compose.yml       ← Ollama + agent in one command (NEW)
 │
 ├── llm/
 │   └── ollama_client.py     ← async Ollama wrapper + tool-call parser
@@ -72,15 +80,19 @@ local-data-analyst/
 │
 ├── utils/
 │   ├── intent_classifier.py ← regex-based pre-routing
-│   └── logger.py            ← Rich-based logger
+│   ├── logger.py            ← Rich-based logger
+│   └── metrics.py           ← in-process latency + usage metrics (NEW)
 │
 ├── data/
 │   ├── chroma_store/        ← ChromaDB persisted here (auto-created)
-│   └── sessions/            ← Short-term memory JSON (auto-created)
+│   ├── sessions/            ← Short-term memory JSON (auto-created)
+│   └── metrics.json         ← persisted metrics snapshot (auto-created)
 │
 └── tests/
     ├── test_tools.py
-    └── test_ollama_client.py
+    ├── test_ollama_client.py
+    ├── test_additions.py    ← tests for metrics, ingest, eval (NEW)
+    └── eval_suite.py        ← integration eval pipeline (NEW)
 ```
 
 ---
@@ -97,153 +109,172 @@ local-data-analyst/
 
 ---
 
-## Setup (CPU-only)
+## Option A — Run locally (CLI or API)
 
 ### 1. Install Ollama
 
-**Linux / macOS:**
 ```bash
 curl -fsSL https://ollama.com/install.sh | sh
-```
-
-**Windows:**  
-Download from https://ollama.com/download
-
-### 2. Pull a CPU-safe model
-
-The agent is configured for `llama3.2:3b` by default (fastest on CPU, ~2 GB).
-
-```bash
-# Recommended: smallest, fastest on CPU
 ollama pull llama3.2:3b
-
-# Alternative: better reasoning, slower (~4 GB)
-ollama pull mistral:7b-instruct-q4_0
-
-# Alternative: Microsoft Phi-3 mini
-ollama pull phi3:mini
-```
-
-Start Ollama (if not already running as a service):
-```bash
 ollama serve
 ```
 
-### 3. Clone / open the project
+### 2. Install dependencies
 
 ```bash
-cd local-data-analyst
-```
-
-### 4. Create a virtual environment
-
-```bash
-python -m venv .venv
-source .venv/bin/activate        # Linux/macOS
-# local-data-analyst\Scripts\activate         # Windows PowerShell
-```
-
-### 5. Install CPU-only PyTorch + dependencies
-
-> **Important:** The `--extra-index-url` flag ensures you get the CPU-only build of PyTorch (~200 MB instead of ~3 GB with CUDA).
-
-```bash
+python3.11 -m venv .venv
+source .venv/bin/activate
 pip install --upgrade pip
-pip install torch --index-url https://download.pytorch.org/whl/cpu
+pip install torch==2.3.0+cpu --extra-index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
 ```
 
-### 6. Configure environment
+### 3. Configure
 
 ```bash
 cp .env.example .env
-# Edit .env if you want a different model or paths
+# Edit .env to change model or paths if needed
 ```
 
-### 7. Download the embedding model (one-time, ~80 MB)
-
-The `all-MiniLM-L6-v2` model downloads automatically on first use. To pre-download:
-
-```bash
-python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
-```
-
----
-
-## Running the Agent
+### 4a. Run the interactive CLI
 
 ```bash
 python orchestrator.py
 ```
 
-The agent will:
-1. Check Ollama is running and the model is available
-2. Start MCP server subprocesses on demand
-3. Open an interactive CLI prompt
+### 4b. Run the REST API
+
+```bash
+uvicorn api:app --host 0.0.0.0 --port 8000 --reload
+```
+
+API docs: http://localhost:8000/docs
 
 ---
 
-## Example Queries
+## Option B — Docker (Ollama + agent in one command)
 
-### Analyse a local CSV file
-```
-You: I have a file at ~/data/sales_2024.csv — analyse the monthly revenue trend
-```
+```bash
+# Build and start everything
+docker compose up --build
 
-### Read a PDF
-```
-You: Read C:\Users\ibtih\Downloads\q3_report.pdf and summarise the key metrics
-```
+# Pull the model (first time only)
+docker compose exec ollama ollama pull llama3.2:3b
 
-### Scrape a web page
-```
-You: Scrape https://en.wikipedia.org/wiki/List_of_countries_by_GDP_(nominal) and show me the top 10 countries
+# The agent API is now available at http://localhost:8000
 ```
 
-### Find files
-```
-You: Find all CSV files in my C:\Users\ directory
+Other Docker commands:
+
+```bash
+# Interactive CLI inside container
+docker compose run --rm agent python orchestrator.py
+
+# Ingest documents
+docker compose run --rm agent python ingest.py /app/data/host_data
+
+# Run eval suite
+docker compose run --rm agent python tests/eval_suite.py
 ```
 
-### Run a computation
-```
-You: Generate 1000 random numbers, compute their mean and standard deviation, and plot a histogram saved to /tmp/hist.png
+---
+
+## REST API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `POST` | `/chat` | Run a query through the full agent loop |
+| `GET` | `/health` | Liveness + Ollama status |
+| `GET` | `/memory/search?q=...` | Semantic search over long-term memory |
+| `GET` | `/metrics` | Latency + usage statistics |
+| `DELETE` | `/memory` | Clear all long-term memory |
+
+### Example: POST /chat
+
+```bash
+curl -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"query": "Compute the mean of [10, 20, 30] in Python"}'
 ```
 
-### Memory retrieval
+```json
+{
+  "response": "The mean of [10, 20, 30] is 20.0.",
+  "session_id": "a1b2c3d4",
+  "duration_seconds": 4.231,
+  "tool_calls_made": 1
+}
 ```
-You: Do you remember what we analysed earlier?
+
+---
+
+## RAG: Ingesting Documents
+
+Pre-index local documents into ChromaDB so the agent can retrieve them
+during analysis:
+
+```bash
+# Index a single file
+python ingest.py ~/reports/q3_report.pdf
+
+# Index a whole folder (txt, md, csv, pdf)
+python ingest.py ~/data/
+
+# Preview without writing
+python ingest.py ~/data/ --dry-run
+
+# List what is stored
+python ingest.py --list
+
+# Clear the store
+python ingest.py --clear
 ```
+
+After ingestion, ask the agent:
+
+```
+You: Summarise the Q3 report findings
+```
+
+The agent will call `vector_search` to retrieve relevant chunks before answering.
 
 ---
 
 ## Running Tests
 
 ```bash
-pytest tests/ -v
+# Unit tests (no Ollama required)
+pytest tests/test_tools.py tests/test_ollama_client.py tests/test_additions.py -v
+
+# Integration eval (requires Ollama running)
+python tests/eval_suite.py
+
+# Eval with a specific model
+python tests/eval_suite.py --model mistral:7b-instruct-q4_0
+
+# Save eval results to JSON
+python tests/eval_suite.py --output eval_results.json
+
+# Run only specific eval cases
+python tests/eval_suite.py --cases E01 E02 E05
 ```
 
-Tests cover:
-- All 5 tool implementations
-- Intent classifier
-- Short-term memory (deque + persistence)
-- Ollama tool-call parser (mocked)
-
-> Tests do **not** require Ollama or a live network connection.
+The eval suite scores each of 10 fixed queries on:
+- **Tool accuracy** (60%) — were the expected tools called?
+- **Keyword coverage** (40%) — does the response contain expected terms?
 
 ---
 
-## Changing the Model
+## Metrics
 
-Edit `.env`:
+The agent tracks latency and usage automatically. Access via:
 
-```
-OLLAMA_MODEL=mistral:7b-instruct-q4_0
-```
-
-Or set it inline:
 ```bash
-OLLAMA_MODEL=phi3:mini python orchestrator.py
+# API
+curl http://localhost:8000/metrics
+
+# Direct file (also written to disk on every request)
+cat data/metrics.json
 ```
 
 ---
@@ -262,9 +293,22 @@ Servers are kept alive across multiple tool calls within a session to avoid subp
 
 ---
 
+## Changing the Model
+
+```bash
+# In .env
+OLLAMA_MODEL=mistral:7b-instruct-q4_0
+
+# Or inline
+OLLAMA_MODEL=phi3:mini python orchestrator.py
+OLLAMA_MODEL=phi3:mini uvicorn api:app --port 8000
+```
+
+---
+
 ## Offline Operation
 
-After initial setup (pip install + `ollama pull`), the agent runs **fully offline**:
+After initial setup, the agent runs **fully offline**:
 
 | Component | Offline? |
 |-----------|---------|
@@ -273,23 +317,3 @@ After initial setup (pip install + `ollama pull`), the agent runs **fully offlin
 | ChromaDB | ✅ Local file store |
 | web_scrape tool | ⚠️ Requires internet (by design) |
 | All other tools | ✅ Local only |
-
----
-
-## Troubleshooting
-
-**"Ollama is not reachable"**  
-→ Run `ollama serve` in a separate terminal.
-
-**"Model not found"**  
-→ Run `ollama pull llama3.2:3b`
-
-**Slow inference on CPU**  
-→ Use `llama3.2:3b` (fastest). Expect 1–5 tokens/sec on a 4-core CPU.  
-→ Reduce `num_ctx` in `llm/ollama_client.py` if RAM is tight.
-
-**ChromaDB import errors**  
-→ Ensure `torch` CPU-only was installed before `chromadb`.
-
-**Tool timeout errors**  
-→ Increase `TOOL_TIMEOUT_SECONDS` in `.env`.
